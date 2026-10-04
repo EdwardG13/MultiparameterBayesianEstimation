@@ -1,0 +1,17 @@
+# Virtual environments and OS / editors
+.venv/
+.vscode/
+.idea/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Qubit research folders (ongoing)
+qubit/old_files/
+qubit/plots/
+qubit/python
+
+# Multilevel research folders
+multilevel/claude/
+multilevel/papers/
