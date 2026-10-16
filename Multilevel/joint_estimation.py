@@ -31,8 +31,8 @@ def build_rate_matrix(T, Nb):
 pop_init = np.zeros(7); pop_init[0] = 1.0 # Initialize in the ground (mF=3) state
 
 # Discretise parameter values
-thetas = np.linspace(500, 1500, 101) # Temperature hypothesis grid (nK)
-Nbs = np.linspace(5e3, 10e3, 101) # Bath atom hypothesis grid (no. atoms)
+thetas = np.linspace(500, 1500, 501) # Temperature hypothesis grid (nK)
+Nbs = np.linspace(2e3, 10e3, 501) # Bath atom hypothesis grid (no. atoms)
 taus = np.linspace(0, 1.2, 101) # Interaction time (s)
 
 # Solve the classical rate equations using the Bateman equations. This can be found on Wikipedia, but Claude wrote this bit.
@@ -86,8 +86,9 @@ def log_prior_1d(x, type, x0, sigma):
         return -0.5 * (np.log(x / x0) / s)**2 - np.log(x) # the -log(x) is the 1/x Jacobian
 
 type_T,  T0,  sigma_T  = "flat", 1000.0, 150.0 # For a flat prior T0 and sigma_T are not used. They are just needed for the function
-#type_Nb, Nb0, sigma_Nb = "gauss", Nb_true, 500
-type_Nb, Nb0, sigma_Nb = "gauss", Nb_true + rng.normal(0, 500.0), 500.0 # Random prior mean
+#type_Nb,  Nb0,  sigma_Nb  = "flat", 6e6, 200
+type_Nb, Nb0, sigma_Nb = "gauss", 6e3 , 1000
+#type_Nb, Nb0, sigma_Nb = "gauss", Nb_true + rng.normal(0, 500.0),1000.0 # Random prior mean
 #type_Nb, Nb0, sigma_Nb = "lognormal", Nb_true, 500
 
 # Because the prior factorises, build each 1D log prior and add them as a column plus a row.
@@ -117,6 +118,7 @@ q_m = populations_bateman([T_true], [Nb_true*np.exp(-h)], taus)[0, 0]
 dq_N = (q_p - q_m) / (2*h) # dq/dlnNb
 g = np.stack([dq_T, dq_N], axis=-1) # (Ntau, 7, 2)
 F_set = mu * g[..., :, None] * g[..., None, :] / np.maximum(q_true, 1e-12)[..., None, None] # Poisson Fisher
+F_set[q_true < 1e-8] = 0.0 # Reduce round-off error
 
 def prior_fisher_1d(x, type, x0, sigma):
     # Fisher information of the prior with respect to ln x (for the log-error CRB)
@@ -132,16 +134,14 @@ F_prior = np.diag([prior_fisher_1d(thetas, type_T, T0, sigma_T),
                    prior_fisher_1d(Nbs, type_Nb, Nb0, sigma_Nb)])
 
 # Define the scan protocol
-#settings = [(19, 0), (40, 6), (50, 3)]   # (tau index, level index)
-settings = [(tau_index, level_index)
-            for level_index in range(7)
-            for tau_index in range(len(taus))] # Scan over all interaction times and states
+#settings = [(5, 0), (50,6)]   # (tau index, level index)
+settings = [(tau_index, level_index) for level_index in range(7) for tau_index in range(len(taus))] # Scan over all interaction times and states
 
 # Main loop
 log_post=log_prior.copy()
 est_list, cov_list, F_list = [], [], []
 F_cum = F_prior.copy()
-for k in range(5000):
+for k in range(1000):
     b, i = settings[k % len(settings)] # Pick the mF level and interaction time
     n = rng.poisson(mu * q_true[b, i]) # Data generation by sampling from the likelihood
     log_post += log_likelihood(n, q[:, :, b, i], mu) # Update the (log) posterior
@@ -193,13 +193,16 @@ plt.show()
 # Variance of the combination the data actually measure: c = u . (ln T, ln Nb)
 w, V = np.linalg.eigh(F_list[-1] - F_prior) # data-only Fisher
 u = V[:, -1] # its best-measured direction (u[0]/u[1] = beta)
-var_c = np.einsum('i,kij,j->k', u, cov_list, u) # Bayes posterior variance of c
-crb_c = np.einsum('i,kij,j->k', u, crb, u) # CRB for c
+var_c = np.array([u @ C @ u for C in cov_list]) # Bayes posterior variance of c
+crb_c = np.array([u @ C @ u for C in crb]) # CRB for c
+#var_c = np.einsum('i,kij,j->k', u, cov_list, u)
+#crb_c = np.einsum('i,kij,j->k', u, crb, u)
 
 plt.loglog(k, var_c, color="C3", label="Bayes")
 plt.loglog(k, crb_c, color="k", ls="--", label="CRB")
 plt.loglog(k, crb_c[-1] * k[-1] / k, color="grey", lw=0.8, label=r"$\propto 1/k$")
-plt.xlabel("k"); plt.ylabel(r"Var$[\ln N_b + \beta \ln T]$"); plt.legend(); plt.show()
+plt.xlabel("k"); plt.ylabel(r"Var$[\ln N_b + \beta \ln T]$")
+plt.legend()
 plt.show()
 
 ### Plot final posterior as a colour map
