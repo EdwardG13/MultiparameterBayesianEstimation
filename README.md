@@ -11,13 +11,14 @@ This repo considers two different systems:
 This follows the experimental setup of Bouton et al. (2019) and Feß et al. (2026). 
 
 This repository computes Bayesian estimates, mean logarithmic error, and information gain under various priors.
-We use a number of different (scan, _a priori_ optimised, and adaptive) protocols.
+We use a number of different protocols (scan, _a priori_ optimised, and adaptive) for different magnetic field strengths, and plot the corresponding estimators, errors, and chosen control parameters.
 
 ## Requirements
 The examples require standard scientific Python packages:
 - `numpy`
 - `scipy`
 - `matplotlib`
+- `tqdm`
 
 ## License
 
