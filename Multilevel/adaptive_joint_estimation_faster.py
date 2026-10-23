@@ -3,26 +3,38 @@ import csv
 import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import linalg
+from scipy.linalg import expm
 from scipy.special import gammaln
 
 # ---------------------------------------------------------------------------
 #  Functions
 # ---------------------------------------------------------------------------
 
-# Read fit coefficients for the rates for a given B field
-def load_fit(B_field, folder="data/fits"):
-    with open(f"{folder}/sigmav_fit_coeffs_B_{B_field}mG.csv", "r") as file:
-        reader = csv.reader(file, delimiter=",")
-        next(reader) # skip 'sep=,'
-        next(reader) # skip column headers
-        return {row[0]: float(row[2]) for row in reader}
+required = ["a0", "a1", "a2", "b1", "b2", "c1", "c2", "c3", "c4"] # every file must have these
+optional = ["a3", "c5", "c6"] # cubic terms, default 0
+
+# Read fit coefficients for the rates for a given B field. Return a dict with each coefficient
+def load_fit(B_field, folder="data/fits", suffix=""):
+    loaded = {}
+    with open(f"{folder}/sigmav_fit_coeffs_B_{B_field}mG{suffix}.csv", "r") as file:
+        for row in csv.reader(file, delimiter=","):
+            try:
+                loaded[row[0].strip()] = float(row[2])
+            except (IndexError, ValueError):
+                continue # 'sep=,' line, header, or blank line
+    missing = set(required) - set(loaded)
+    unknown = set(loaded) - set(required + optional)
+    assert not missing, f"missing coefficients: {missing}"
+    assert not unknown, f"unknown coefficients: {unknown}"
+    fit = dict.fromkeys(optional, 0.0) # only the cubic terms default to 0
+    fit.update(loaded)
+    return fit
 
 # <sigma v> function from fit coefficients
 def sigv(fit, mF, T):
-    return (fit["a0"] + fit["a1"] * mF + fit["a2"] * mF**2
-            + (fit["b1"] + fit["c1"] * mF + fit["c2"] * mF**2) * T
-            + (fit["b2"] + fit["c3"] * mF + fit["c4"] * mF**2) * T**2)
+    return ((fit["a0"] + fit["a1"]*mF + fit["a2"]*mF**2 + fit["a3"]*mF**3)
+          + (fit["b1"] + fit["c1"]*mF + fit["c2"]*mF**2 + fit["c5"]*mF**3) * T
+          + (fit["b2"] + fit["c3"]*mF + fit["c4"]*mF**2 + fit["c6"]*mF**3) * T**2)
 
 # Spin-exchange rates out of state mF (Hz).
 def rate(fit, mF, T, Nb):
@@ -30,14 +42,25 @@ def rate(fit, mF, T, Nb):
     return 0.159 * sigv(fit,mF,T)*1e-10 * Nb * (T/1e9) ** (-1.5)
 
 # Build rate matrix describing the (classical) population dynamics of the 7 mF levels
-def build_rate_matrix(fit, T, Nb):
-    Gamma = np.zeros((7, 7)) # index i <-> mF = 3 - i
-    for i in range(6):
-        r = rate(fit, 3 - i, T, Nb)
-        Gamma[i, i] = -r
-        Gamma[i + 1, i] = r
-    return Gamma
+def build_Gamma(fit_down, fit_up, thetas, Nbs):
+    # Returns rate matrices at every grid point, shape (NT, NN, 7, 7)
+    T, N = np.asarray(thetas, float)[:, None], np.asarray(Nbs, float)[None, :]
+    G = np.zeros((T.shape[0], N.shape[1], 7, 7))
+    for i in range(7):
+        mF = 3 - i # index i <-> mF = 3 - i
+        if i < 6: # down: mF -> mF-1
+            r = rate(fit_down, mF, T, N)
+            assert np.all(r >= 0), f"negative rate for mF={mF:+d}: min {r.min():.2e} (check the fit / T range)"
+            G[..., i + 1, i] += r
+            G[..., i, i] -= r
+        if fit_up is not None and i > 0: # up (endothermic): mF -> mF+1
+            r = rate(fit_up, mF, T, N)
+            assert np.all(r >= 0), f"negative rate for mF={mF:+d}: min {r.min():.2e} (check the fit / T range)"
+            G[..., i - 1, i] += r
+            G[..., i, i] -= r
+    return G
 
+"""
 # Solve the classical rate equations using the Bateman equations. This can be found on Wikipedia, but Claude wrote this bit. Assumes the state is initialised in mF=3.
 def populations_bateman(fit, thetas, Nbs, taus):
     # q[a, c, b, i]: T = thetas[a], Nb = Nbs[c], tau = taus[b], level i (mF = 3 - i)
@@ -54,6 +77,26 @@ def populations_bateman(fit, thetas, Nbs, taus):
     q = np.empty(lam.shape[:-1] + (len(taus), 7))
     q[..., :6] = np.einsum('acik,acbk->acbi', C, E)
     q[..., 6] = 1.0 - q[..., :6].sum(-1)
+    return q
+"""
+
+def populations(fit_down, fit_up, thetas, Nbs, taus):
+    # q[a, c, b, i]: T = thetas[a], Nb = Nbs[c], tau = taus[b], level i (mF = 3 - i). Start in mF = +3.
+    # This precomputes the population probabilities q for every point on the parameter space and for all times tau.
+    # It works by stepping through the tau array, using the formula q(t+dt)=exp(Gamma(t+dt))q_0= P q(t), where P=exp(Gamma dt) and q(t)=exp(Gamma t)q_0.
+    # Importantly, the tau grid must be equally spaced.
+    taus = np.asarray(taus, float)
+    dtau = taus[1] - taus[0]
+    G = build_Gamma(fit_down, fit_up, thetas, Nbs) # (NT, NN, 7, 7)
+    P = expm(G * dtau) # propagator over one tau step, one per grid point
+    q = np.zeros(G.shape[:2] + (len(taus), 7))
+    q[..., 0, 0] = 1.0 # tau = 0: all population in mF = +3
+    for b in range(1, len(taus)):
+        # q[..., b, :] = np.einsum('acij,acj->aci', P, q[..., b - 1, :]) # q(tau_b) = P q(tau_{b-1})
+        for a in range(len(thetas)):
+            for c in range(len(Nbs)):
+                q[a, c, b, :] = P[a, c] @ q[a, c, b - 1, :]  # (7x7) @ (7,) -> (7,)
+    assert np.all(q > -1e-10) and np.all(q < 1 + 1e-10), "populations outside [0, 1]"
     return q
 
 # Define a 2d integration function over the T,Nb parameter grids. Uses the numpy trapezium rule
@@ -162,18 +205,20 @@ thetas = np.linspace(500, 1500, 501) # Temperature hypothesis grid (nK)
 Nbs = np.linspace(2e3, 10e3, 501) # Bath atom hypothesis grid (no. atoms)
 taus = np.linspace(0, 1.2, 21) # Interaction time (s)
 
-B_field = 500.0 # mG (can only choose from known fits)
+B_field = 50.0 # mG (can only choose from known fits)
 fit = load_fit(B_field) # Read fit coefficients for the rates for a given B field
+#fit_up = None # Replace None by fit_up for endothermic rates (only for B=50mG)
+fit_up = load_fit(B_field,suffix="_endo")
 
 # Precompute the populations of the 7 levels for all parameter values and interation times.
-q = populations_bateman(fit, thetas, Nbs, taus) # Has dimensions (len(thetas), len(Nbs), len(taus), 7)
+q = populations(fit, fit_up, thetas, Nbs, taus) # Has dimensions (len(thetas), len(Nbs), len(taus), 7).
 
 mu = 30 # Mean Cs atom number
 T_true, Nb_true = 975.0, 6.6e3 # True T and Nb of Rb bath
 
 seed=42
 rng = np.random.default_rng(seed)
-q_true = populations_bateman(fit,[T_true], [Nb_true], taus)[0, 0] # (Ntau, 7)
+q_true = populations(fit,fit_up, [T_true], [Nb_true], taus)[0, 0] # (Ntau, 7)
 q_true = np.clip(q_true, 0, None) # Stop floating-point numerical issues
 
 # Prior choices
@@ -196,11 +241,11 @@ F_prior = np.diag([prior_fisher_1d(thetas, type_T, T0, sigma_T),
 
 # Per-setting Fisher matrix in (ln T, ln Nb) at the true point: F[b, i] is 2x2
 h = 1e-4
-q_p = populations_bateman(fit,[T_true*np.exp(h)], [Nb_true], taus)[0, 0]
-q_m = populations_bateman(fit,[T_true*np.exp(-h)], [Nb_true], taus)[0, 0]
+q_p = populations(fit,fit_up,[T_true*np.exp(h)], [Nb_true], taus)[0, 0]
+q_m = populations(fit,fit_up,[T_true*np.exp(-h)], [Nb_true], taus)[0, 0]
 dq_T = (q_p - q_m) / (2*h)  # dq/dlnT
-q_p = populations_bateman(fit,[T_true], [Nb_true*np.exp(h)], taus)[0, 0]
-q_m = populations_bateman(fit,[T_true], [Nb_true*np.exp(-h)], taus)[0, 0]
+q_p = populations(fit,fit_up,[T_true], [Nb_true*np.exp(h)], taus)[0, 0]
+q_m = populations(fit,fit_up,[T_true], [Nb_true*np.exp(-h)], taus)[0, 0]
 dq_N = (q_p - q_m) / (2*h) # dq/dlnNb
 g = np.stack([dq_T, dq_N], axis=-1) # (Ntau, 7, 2)
 F_set = mu * g[..., :, None] * g[..., None, :] / np.maximum(q_true, 1e-12)[..., None, None] # Poisson Fisher
@@ -223,7 +268,7 @@ def block_schedule(n_shots, M_min, M_frac, M_max):
 # ---------------------------------------------------------------------------
 
 n_shots = 100000 # total number of shots
-M_min, M_max, M_frac = 100, 1e4, 0.05 # shots per adaptive decision = min(M_max,max(M_min, M_frac of shots so far)).
+M_min, M_max, M_frac = 100, 10000, 0.05 # shots per adaptive decision = min(M_max,max(M_min, M_frac of shots so far)).
 n_sig = 8 # number of standard deviations the new grid will update to (= posterior mean ± n_sig sigma (in log units))
 
 log_post = log_prior.copy()
@@ -242,10 +287,10 @@ for j, M in enumerate(tqdm.tqdm(Ms, file=sys.stdout, dynamic_ncols=True)):
     # Choose the number of shots per adaptive step (M=1 is fully adaptive). See comment above. The n_shots - k is to make sure the last shot is such that there is n_shots total.
     # M = min(max(M_min, int(M_frac * k)), M_max, n_shots - k)
 
-    # Zoom the grid onto the posterior and rebuild it exactly from all data so far
+    # Zoom the grid onto the posterior and rebuild it from all data so far
     if k >= 1000:
         thetas, Nbs = zoom(post, thetas, Nbs, n_sig)
-        q = populations_bateman(fit,thetas, Nbs, taus)
+        q = populations(fit,fit_up,thetas, Nbs, taus)
         log_post = rebuild_log_post(thetas, Nbs, q, N_tot, m_tot)
         post = posterior(log_post, thetas, Nbs)
 

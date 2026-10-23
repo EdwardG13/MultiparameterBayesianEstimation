@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Choose file to load
-B_field=500.0
+B_field=50.0
 n_shots_str="1e5"
 seed=42
 
