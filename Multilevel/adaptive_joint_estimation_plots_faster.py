@@ -3,14 +3,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Choose file to load
-B_field=50.0
+B_field=400.0
 n_shots_str="1e5"
 seed=42
 
 d = np.load(f"data/adaptive_run_B_{B_field}mG_{n_shots_str}_seed{seed}.npz")
 #d = np.load("adaptive_run.npz")
 
-plot_dir = f"plots/plots_B_{B_field}mG_{n_shots_str}_seed{seed}"
+plot_dir = f"plots/plots_B_{B_field}mG_{n_shots_str}_seed{seed}_flat"
 os.makedirs(plot_dir, exist_ok=True) # creates the folder; no error if it already exists
 
 

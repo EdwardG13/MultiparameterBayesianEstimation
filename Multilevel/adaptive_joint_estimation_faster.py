@@ -38,12 +38,12 @@ def sigv(fit, mF, T):
 
 # Spin-exchange rates out of state mF (Hz).
 def rate(fit, mF, T, Nb):
-    # This is the product of <sigma v> and the mean density of the Rb bath, here taken as Nb T^-3/2
+    # This is the product of <sigma v> and the mean density of the Rb bath, here taken as 0.159 * Nb T^-3/2
     return 0.159 * sigv(fit,mF,T)*1e-10 * Nb * (T/1e9) ** (-1.5)
 
 # Build rate matrix describing the (classical) population dynamics of the 7 mF levels
 def build_Gamma(fit_down, fit_up, thetas, Nbs):
-    # Returns rate matrices at every grid point, shape (NT, NN, 7, 7)
+    # Returns rate matrices at every grid point, shape (len(T), len(N), 7, 7)
     T, N = np.asarray(thetas, float)[:, None], np.asarray(Nbs, float)[None, :]
     G = np.zeros((T.shape[0], N.shape[1], 7, 7))
     for i in range(7):
@@ -60,29 +60,9 @@ def build_Gamma(fit_down, fit_up, thetas, Nbs):
             G[..., i, i] -= r
     return G
 
-"""
-# Solve the classical rate equations using the Bateman equations. This can be found on Wikipedia, but Claude wrote this bit. Assumes the state is initialised in mF=3.
-def populations_bateman(fit, thetas, Nbs, taus):
-    # q[a, c, b, i]: T = thetas[a], Nb = Nbs[c], tau = taus[b], level i (mF = 3 - i)
-    thetas, Nbs, taus = (np.asarray(x, float) for x in (thetas, Nbs, taus))
-    mF = 3 - np.arange(6)
-    lam = rate(fit,mF[None, None, :], thetas[:, None, None], Nbs[None, :, None])  # (NT, NN, 6)
-    diff = lam[..., :, None] - lam[..., None, :]
-    diff[..., np.arange(6), np.arange(6)] = 1.0
-    P = np.cumprod(diff, axis=-2)
-    N = np.concatenate([np.ones(lam.shape[:-1] + (1,)),
-                        np.cumprod(lam[..., :-1], axis=-1)], axis=-1)
-    C = np.tril(N[..., :, None] / P)
-    E = np.exp(-lam[..., None, :] * taus[None, None, :, None])   # (NT, NN, Ntau, 6)
-    q = np.empty(lam.shape[:-1] + (len(taus), 7))
-    q[..., :6] = np.einsum('acik,acbk->acbi', C, E)
-    q[..., 6] = 1.0 - q[..., :6].sum(-1)
-    return q
-"""
-
 def populations(fit_down, fit_up, thetas, Nbs, taus):
-    # q[a, c, b, i]: T = thetas[a], Nb = Nbs[c], tau = taus[b], level i (mF = 3 - i). Start in mF = +3.
     # This precomputes the population probabilities q for every point on the parameter space and for all times tau.
+    # q[a, c, b, i] where T = thetas[a], Nb = Nbs[c], tau = taus[b], level i (mF = 3 - i). Start in mF = +3.
     # It works by stepping through the tau array, using the formula q(t+dt)=exp(Gamma(t+dt))q_0= P q(t), where P=exp(Gamma dt) and q(t)=exp(Gamma t)q_0.
     # Importantly, the tau grid must be equally spaced.
     taus = np.asarray(taus, float)
@@ -92,10 +72,11 @@ def populations(fit_down, fit_up, thetas, Nbs, taus):
     q = np.zeros(G.shape[:2] + (len(taus), 7))
     q[..., 0, 0] = 1.0 # tau = 0: all population in mF = +3
     for b in range(1, len(taus)):
+        q[..., b, :] = (P @ q[..., b - 1, :, None])[..., 0] # batched (7x7)@(7,) over the whole grid at once, instead of a Python loop over grid points
         # q[..., b, :] = np.einsum('acij,acj->aci', P, q[..., b - 1, :]) # q(tau_b) = P q(tau_{b-1})
-        for a in range(len(thetas)):
-            for c in range(len(Nbs)):
-                q[a, c, b, :] = P[a, c] @ q[a, c, b - 1, :]  # (7x7) @ (7,) -> (7,)
+        # for a in range(len(thetas)):
+        #     for c in range(len(Nbs)):
+        #         q[a, c, b, :] = P[a, c] @ q[a, c, b - 1, :]  # (7x7) @ (7,) -> (7,)
     assert np.all(q > -1e-10) and np.all(q < 1 + 1e-10), "populations outside [0, 1]"
     return q
 
@@ -205,10 +186,10 @@ thetas = np.linspace(500, 1500, 501) # Temperature hypothesis grid (nK)
 Nbs = np.linspace(2e3, 10e3, 501) # Bath atom hypothesis grid (no. atoms)
 taus = np.linspace(0, 1.2, 21) # Interaction time (s)
 
-B_field = 50.0 # mG (can only choose from known fits)
+B_field = 400.0 # mG (can only choose from known fits)
 fit = load_fit(B_field) # Read fit coefficients for the rates for a given B field
-#fit_up = None # Replace None by fit_up for endothermic rates (only for B=50mG)
-fit_up = load_fit(B_field,suffix="_endo")
+fit_up = None # Replace None by fit_up for endothermic rates (only for B=50mG)
+#fit_up = load_fit(B_field,suffix="_endo")
 
 # Precompute the populations of the 7 levels for all parameter values and interation times.
 q = populations(fit, fit_up, thetas, Nbs, taus) # Has dimensions (len(thetas), len(Nbs), len(taus), 7).
@@ -223,8 +204,8 @@ q_true = np.clip(q_true, 0, None) # Stop floating-point numerical issues
 
 # Prior choices
 type_T,  T0,  sigma_T  = "flat", 1000.0, 150.0 # For a flat prior T0 and sigma_T are not used. They are just needed for the function
-#type_Nb,  Nb0,  sigma_Nb  = "flat", 6e6, 200
-type_Nb, Nb0, sigma_Nb = "gauss", 6e3 , 1000
+type_Nb,  Nb0,  sigma_Nb  = "flat", 6e3, 200
+#type_Nb, Nb0, sigma_Nb = "gauss", 6e3 , 1000
 #type_Nb, Nb0, sigma_Nb = "gauss", Nb_true + rng.normal(0, 500.0),1000.0 # Random prior mean
 #type_Nb, Nb0, sigma_Nb = "lognormal", Nb_true, 500
 
@@ -268,7 +249,7 @@ def block_schedule(n_shots, M_min, M_frac, M_max):
 # ---------------------------------------------------------------------------
 
 n_shots = 100000 # total number of shots
-M_min, M_max, M_frac = 100, 10000, 0.05 # shots per adaptive decision = min(M_max,max(M_min, M_frac of shots so far)).
+M_min, M_max, M_frac = 100, 10000, 0.1 # shots per adaptive decision = min(M_max,max(M_min, M_frac of shots so far)).
 n_sig = 8 # number of standard deviations the new grid will update to (= posterior mean ± n_sig sigma (in log units))
 
 log_post = log_prior.copy()
@@ -325,7 +306,7 @@ n_shots_str = f"{n_shots:.0e}"
 mantissa, exponent = n_shots_str.split("e")
 n_shots_str = f"{mantissa}e{int(exponent)}"
 
-np.savez(f"data/adaptive_run_B_{B_field}mG_{n_shots_str}_seed{seed}.npz",
+np.savez(f"data/adaptive_run_B_{B_field}mG_{n_shots_str}_seed{seed}_flat.npz",
     thetas=thetas, Nbs=Nbs, taus=taus, mu=mu, T_true=T_true, Nb_true=Nb_true,
     k=np.array(k_list), M=np.array(M_list),
     est=np.array(est_list), cov=np.array(cov_list), F=np.array(F_list), F_prior=F_prior,
