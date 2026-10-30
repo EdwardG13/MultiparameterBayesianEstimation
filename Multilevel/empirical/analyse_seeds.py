@@ -43,13 +43,19 @@ F   = np.stack([d["F"]   for d in runs])   # (S, Nk, 2, 2)    cumulative Fisher 
 
 # Everything below is in log units, where the estimator and posterior covariance live.
 # sqrt of a log-variance is a relative error: sqrt(Var[ln T]) ~ dT/T.
-err = np.log(est) - np.log(truth)                                     # (S, Nk, 2)  ln(est/true)
+# Every seed-average carries a Monte-Carlo error sd/sqrt(S), because S is finite.
+mc = lambda x: np.std(x, axis=0, ddof=1) / np.sqrt(S)
 
-mse        = np.mean(err[..., :, None] * err[..., None, :], axis=0)   # (Nk,2,2) empirical MSE matrix: E[(est-true)(est-true)^T]
-mean_err   = err.mean(axis=0)                                         # (Nk,2)   bias of ln estimate
-var_est    = err.var(axis=0, ddof=1)                                  # (Nk,2)   sample variance of estimates about their own mean
-post_var   = cov.mean(axis=0)                                         # (Nk,2,2) average posterior covariance (average the VARIANCES, not the sigmas)
-sem        = np.sqrt(var_est / S)                                     # (Nk,2)   standard error of the seed-averaged estimate
+# (A) Bayesian figure of merit, needs NO truth: the expected posterior variance
+V = np.stack([cov[..., 0, 0], cov[..., 1, 1]], axis=-1)               # (S, Nk, 2) each seed's Var[ln T], Var[ln Nb]
+post_var = cov.mean(axis=0)                                           # (Nk,2,2) average the VARIANCES, not the sds
+post_var_mc = mc(V)                                                   # (Nk,2)
+
+# (B) Calibration check, needs the truth: is the reported posterior variance honest?
+err = np.log(est) - np.log(truth)                                     # (S, Nk, 2)  ln(est/true)
+mse = np.mean(err[..., :, None] * err[..., None, :], axis=0)          # (Nk,2,2) empirical MSE matrix
+mse_mc = mc(err**2)                                                   # (Nk,2)
+bias, bias_mc = err.mean(axis=0), mc(err)                             # (Nk,2)
 
 # CRB for the adaptive protocol: the Fisher information of the whole adaptive record is the
 # data-averaged cumulative Fisher E[sum_j F(setting_j)], so the bound is inv(mean_s F_s).
@@ -58,20 +64,28 @@ crb = np.full_like(F_mean, np.nan)
 ok = np.linalg.det(F_mean) > 0
 crb[ok] = np.linalg.inv(F_mean[ok])
 
-# Monte-Carlo uncertainty on the MSE itself (it's an average of S numbers): sd(err^2)/sqrt(S)
-mse_sd = np.std(err**2, axis=0, ddof=1) / np.sqrt(S)                  # (Nk,2)
-
 # ---------------------------------------------------------------------------
-#  Summary at the final k
+#  Summary at the final k  (value ± Monte-Carlo error from the finite number of seeds)
 # ---------------------------------------------------------------------------
 names = ["T", "Nb"]
-print(f"\nFinal k = {k[-1]}, S = {S} seeds  (all errors relative, i.e. in ln units)")
-print(f"{'':4s}{'mean est':>12s}{'bias':>10s}{'rms err':>10s}{'spread':>10s}{'<post sd>':>11s}{'CRB sd':>9s}{'SEM':>9s}")
+pm = lambda v, e: f"{f'{v:.2%} ± {e:.2%}':>18s}"
+print(f"\nFinal k = {k[-1]}, S = {S} seeds  (relative errors, i.e. sqrt of ln-variances)")
+print(f"{'':4s}{'mean est':>10s}{'<post sd> (Bayes)':>18s}{'CRB sd':>9s}"
+      f"{'rms err (truth)':>18s}{'bias (truth)':>18s}{'MSE/<post var>':>18s}")
 for p in range(2):
-    print(f"{names[p]:4s}{np.exp(np.log(est[:, -1, p]).mean()):12.1f}"
-          f"{mean_err[-1, p]:10.3%}{np.sqrt(mse[-1, p, p]):10.3%}{np.sqrt(var_est[-1, p]):10.3%}"
-          f"{np.sqrt(post_var[-1, p, p]):11.3%}{np.sqrt(crb[-1, p, p]):9.3%}{sem[-1, p]:9.3%}")
-print("rms err^2 = bias^2 + spread^2 (up to S/(S-1));  <post sd> ~ rms err if posteriors are calibrated")
+    pv, pv_e = post_var[-1, p, p], post_var_mc[-1, p]
+    m,  m_e  = mse[-1, p, p], mse_mc[-1, p]
+    ratio = m / pv
+    ratio_e = ratio * np.hypot(m_e / m, pv_e / pv)
+    print(f"{names[p]:4s}{np.exp(np.log(est[:, -1, p]).mean()):10.1f}"
+          f"{pm(np.sqrt(pv), pv_e / (2*np.sqrt(pv)))}{np.sqrt(crb[-1, p, p]):9.2%}"
+          f"{pm(np.sqrt(m), m_e / (2*np.sqrt(m)))}{pm(bias[-1, p], bias_mc[-1, p])}"
+          f"{f'{ratio:.2f} ± {ratio_e:.2f}':>18s}")
+print("MSE/<post var> = 1 means the posteriors are calibrated at this true point.")
+
+def band(ax, x, y, e, c, lab, log=True):
+    (ax.loglog if log else ax.semilogx)(x, y, color=c, label=lab)
+    ax.fill_between(x, np.maximum(y - e, 1e-3 * y), y + e, color=c, alpha=0.2, lw=0)
 
 # ---------------------------------------------------------------------------
 #  1) Final estimate of every seed, with its own posterior error bar, normalised to the truth
@@ -88,21 +102,25 @@ for p, (m, c, lab, off) in enumerate([("o", "C3", r"$T$", 0), ("s", "C0", r"$N_b
     ax.fill_between([off - 0.7, off + S - 0.3], np.exp(-r), np.exp(r), color=c, alpha=0.12, lw=0)
 ax.axhline(1, color="grey", ls="--")
 ax.set_xticks([(S - 1) / 2, gap + (S - 1) / 2]); ax.set_xticklabels([r"$T$", r"$N_b$"])
-ax.set_ylabel(r"estimate / true value"); ax.set_ylim(bottom=0)
+ax.set_ylabel(r"estimate / true value")
+#ax.set_ylim(bottom=0)
 ax.set_title(f"Final estimates, {S} seeds, k = {k[-1]}  (band: empirical rms error)", fontsize=9)
 save_plot("final_estimates_scatter")
 plt.show()
 
 # ---------------------------------------------------------------------------
-#  2) Estimates vs k: every seed (thin) + seed-average and empirical spread
+#  2) Estimates vs k: seed-average ± mean posterior sd; thin lines = individual seeds
 # ---------------------------------------------------------------------------
+SHOW_SEEDS = True
 fig, axes = plt.subplots(1, 2, figsize=(11, 4))
 for p, (ax, c, lab) in enumerate(zip(axes, ("C3", "C0"), (r"$T$ (nK)", r"$N_b$"))):
-    ax.semilogx(k, est[:, :, p].T, color=c, lw=0.5, alpha=0.35)
+    if SHOW_SEEDS:
+        lines = ax.semilogx(k, est[:, :, p].T, color=c, lw=0.4, alpha=0.3)
+        lines[0].set_label("individual seeds")
     gm = np.exp(np.log(est[:, :, p]).mean(axis=0))            # geometric mean (mean in ln units)
-    sd = np.sqrt(var_est[:, p])
+    ps = np.sqrt(post_var[:, p, p])
     ax.semilogx(k, gm, color="k", lw=1.5, label="seed average")
-    ax.fill_between(k, gm * np.exp(-sd), gm * np.exp(sd), color=c, alpha=0.3, label="empirical spread")
+    ax.fill_between(k, gm * np.exp(-ps), gm * np.exp(ps), color=c, alpha=0.25, lw=0, label="± mean posterior sd")
     ax.axhline(truth[p], color="grey", ls="--", label="true")
     ax.set_xlabel("k"); ax.set_ylabel(lab)
 axes[0].legend(fontsize=8)
@@ -111,18 +129,17 @@ save_plot("estimates_vs_k")
 plt.show()
 
 # ---------------------------------------------------------------------------
-#  3) Error vs k: empirical MSE vs average posterior variance vs CRB
+#  3) Error vs k: mean posterior variance (Bayes) vs empirical MSE (check) vs CRB
+#     Shaded bands = Monte-Carlo error from the finite number of seeds.
 # ---------------------------------------------------------------------------
 fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharex=True)
 tr = lambda A: A[..., 0, 0] + A[..., 1, 1]
-panels = [(mse[:, 0, 0], post_var[:, 0, 0], var_est[:, 0], crb[:, 0, 0], mse_sd[:, 0], r"$\epsilon_T$"),
-          (mse[:, 1, 1], post_var[:, 1, 1], var_est[:, 1], crb[:, 1, 1], mse_sd[:, 1], r"$\epsilon_{N_b}$"),
-          (tr(mse), tr(post_var), var_est.sum(1), tr(crb), np.sqrt((mse_sd**2).sum(1)), r"$\epsilon_T+\epsilon_{N_b}$")]
-for ax, (m, pv, ve, c, msd, t) in zip(axes, panels):
-    ax.loglog(k, m, color="C3", label="empirical MSE")
-    ax.fill_between(k, np.maximum(m - msd, 1e-12), m + msd, color="C3", alpha=0.2)
-    ax.loglog(k, ve, color="C3", ls=":", label="empirical variance")
-    ax.loglog(k, pv, color="C0", label="mean posterior var")
+panels = [(post_var[:, 0, 0], post_var_mc[:, 0], mse[:, 0, 0], mse_mc[:, 0], crb[:, 0, 0], r"$\epsilon_T$"),
+          (post_var[:, 1, 1], post_var_mc[:, 1], mse[:, 1, 1], mse_mc[:, 1], crb[:, 1, 1], r"$\epsilon_{N_b}$"),
+          (tr(post_var), mc(V.sum(-1)), tr(mse), mc((err**2).sum(-1)), tr(crb), r"$\epsilon_T+\epsilon_{N_b}$")]
+for ax, (pv, pv_e, m, m_e, c, t) in zip(axes, panels):
+    band(ax, k, pv, pv_e, "C0", "mean posterior var (Bayes)")
+    band(ax, k, m, m_e, "C3", "empirical MSE (uses truth)")
     ax.loglog(k, c, color="k", ls="--", label=r"CRB $(\mathbb{E}\sum F)^{-1}$")
     ax.set_title(t); ax.set_xlabel("k")
 axes[0].legend(fontsize=8); plt.tight_layout()
@@ -136,8 +153,9 @@ w, V = np.linalg.eigh(F_mean[-1] - F_prior)
 u = V[:, -1]
 proj = lambda A: np.einsum("i,...ij,j->...", u, A, u)
 e_c = err @ u                                          # (S, Nk)
-plt.loglog(k, np.mean(e_c**2, axis=0), color="C3", label="empirical MSE")
-plt.loglog(k, proj(post_var), color="C0", label="mean posterior var")
+V_c = proj(cov)                                        # (S, Nk) each seed's posterior variance of c
+band(plt.gca(), k, V_c.mean(0), mc(V_c), "C0", "mean posterior var (Bayes)")
+band(plt.gca(), k, np.mean(e_c**2, axis=0), mc(e_c**2), "C3", "empirical MSE (uses truth)")
 crb_c = proj(crb)
 plt.loglog(k, crb_c, color="k", ls="--", label="CRB")
 plt.loglog(k, crb_c[-1] * k[-1] / k, color="grey", lw=0.8, label=r"$\propto 1/k$")

@@ -17,13 +17,13 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 #  Configuration (cheap constants only: this block runs again in every worker)
 # ---------------------------------------------------------------------------
 
-T_RANGE  = (500.0, 1500.0)   # prior support for T (nK)
-NB_RANGE = (2e3, 10e3)       # prior support for Nb
-NG = 501                     # grid points per parameter
+T_RANGE  = (500.0, 1500.0) # prior support for T (nK)
+NB_RANGE = (2e3, 10e3) # prior support for Nb
+NG = 501 # grid points per parameter
 taus = np.linspace(0, 1.2, 21)  # interaction times (s), must be equally spaced
 
-B_field = 400.0    # mG (only known fits)
-USE_ENDO = False   # True -> include endothermic rates (only for B = 50 mG)
+B_field = 50.0    # mG (only known fits)
+USE_ENDO = True   # True -> include endothermic rates (only for B = 50 mG)
 
 mu = 30                           # mean Cs atom number
 T_true, Nb_true = 975.0, 6.6e3    # true T and Nb of the Rb bath
@@ -33,8 +33,9 @@ type_Nb, Nb0, sigma_Nb = "flat", 6e3, 200
 #type_Nb, Nb0, sigma_Nb = "gauss", 6e3, 1000
 #type_Nb, Nb0, sigma_Nb = "lognormal", Nb_true, 500
 
-n_shots = 10000
-M_min, M_max, M_frac = 100, 1000, 0.1
+n_shots = 5000
+#M_min, M_max, M_frac = 100, 1000, 0.1
+M_min, M_max, M_frac = 100, 100, 0
 n_sig = 8
 k_zoom = 1000        # start zooming the grid once this many shots are taken
 
