@@ -3,11 +3,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Choose file to load
-B_field=400.0
-n_shots_str="1e5"
+B_field=50.0
+n_shots_str="5e3"
 seed=42
 
-d = np.load(f"data/adaptive_run_B_{B_field}mG_{n_shots_str}_seed{seed}.npz")
+d = np.load(f"data/adaptive_run_B_{B_field}mG_{n_shots_str}_seed{seed}_flat_longt.npz")
 #d = np.load("adaptive_run.npz")
 
 plot_dir = f"plots/plots_B_{B_field}mG_{n_shots_str}_seed{seed}_flat"
@@ -135,3 +135,42 @@ ax.set_xlabel(r"$\tau$ (s)"); ax.set_ylabel(r"$m_F$"); ax.set_zlabel(r"$K/K_{\ma
 ax.view_init(elev=30, azim=-60)
 save_plot("info_gain_3D")
 plt.show()
+
+### Summary: final estimates, errors, and how often each setting was used
+m_tot, N_tot = d["m_tot"], d["N_tot"]
+mu = float(d["mu"])
+C = cov_list[-1]
+est_T, est_N = est_list[-1]
+sT, sN = np.sqrt(C[0, 0]), np.sqrt(C[1, 1])          # posterior std of ln T, ln Nb
+zT = (np.log(est_T) - np.log(T_true)) / sT            # (estimate - truth) in posterior sigmas
+zN = (np.log(est_N) - np.log(Nb_true)) / sN
+
+lines = [f"Run: {plot_dir}",
+         f"shots: {int(k[-1])}   decisions: {len(k)}",
+         f"T  = {est_T:8.2f} +/- {est_T*sT:6.2f} nK    (true {T_true:.1f}, z = {zT:+.2f})",
+         f"Nb = {est_N:8.1f} +/- {est_N*sN:6.1f}       (true {Nb_true:.0f}, z = {zN:+.2f})",
+         f"eps_T = {C[0,0]:.3e}  eps_Nb = {C[1,1]:.3e}  sum = {np.trace(C):.3e}",
+         f"CRB:    {crb[-1][0,0]:.3e}           {crb[-1][1,1]:.3e}        {np.trace(crb[-1]):.3e}"
+         f"   (Bayes/CRB = {np.trace(C)/np.trace(crb[-1]):.3f})",
+         "",
+         " tau_s   mF     shots   fraction   late-half frac   mean counts/shot"]
+
+# fraction of shots per setting in the second half of the run (closer to the asymptotic design)
+late = np.zeros_like(m_tot)
+for kk, MM, bb, ii in zip(k, M, chosen_b, chosen_i):
+    start = kk - MM                                    # this block covers shots start+1 .. kk
+    late[bb, ii] += max(0, kk - max(start, k[-1] / 2))
+late /= late.sum()
+
+order = np.argsort(m_tot.ravel())[::-1]
+for s in order:
+    b, i = divmod(s, 7)
+    if m_tot[b, i] == 0:
+        break
+    lines.append(f"{taus[b]:6.2f}  {3-i:+3d}  {int(m_tot[b, i]):8d}   {m_tot[b, i]/m_tot.sum():.4f}"
+                 f"         {late[b, i]:.4f}          {N_tot[b, i]/m_tot[b, i]:.3f}")
+
+summary = "\n".join(lines)
+print(summary)
+with open(os.path.join(plot_dir, "summary.txt"), "w") as f:
+    f.write(summary + "\n")

@@ -1,0 +1,11 @@
+Run: plots/plots_B_50.0mG_5e3_seed42_flat
+shots: 5000   decisions: 39
+T  =   972.02 +/-   8.67 nK    (true 975.0, z = -0.34)
+Nb =   6596.8 +/-  139.4       (true 6600, z = -0.02)
+eps_T = 7.955e-05  eps_Nb = 4.467e-04  sum = 5.263e-04
+CRB:    7.989e-05           4.485e-04        5.284e-04   (Bayes/CRB = 0.996)
+
+ tau_s   mF     shots   fraction   late-half frac   mean counts/shot
+  5.00   -2      4279   0.8558         0.8716          3.362
+  0.25   -3       621   0.1242         0.1284          4.559
+  0.50   -3       100   0.0200         0.0000          14.760
