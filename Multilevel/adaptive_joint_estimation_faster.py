@@ -13,22 +13,43 @@ from scipy.special import gammaln
 required = ["a0", "a1", "a2", "b1", "b2", "c1", "c2", "c3", "c4"] # every file must have these
 optional = ["a3", "c5", "c6"] # cubic terms, default 0
 
-# Read fit coefficients for the rates for a given B field. Return a dict with each coefficient
-def load_fit(B_field, folder="data/fits", suffix=""):
-    loaded = {}
-    with open(f"{folder}/sigmav_fit_coeffs_B_{B_field}mG{suffix}.csv", "r") as file:
+# Read the <sigma v> fit coefficients for a given B field.
+# Returns (fit_down, fit_up): exothermic (mF -> mF-1) and endothermic (mF -> mF+1) coefficients,
+# in units of 1e-10 cm^3/s with T in nK (as rate() assumes). fit_up is None if the file has no endo rows.
+def load_fits(B_field, folder="data/fits"):
+    path = f"{folder}/sigmav_fit_coeffs_B_{B_field}mG.csv"
+    loaded = {"exo": {}, "endo": {}}
+    with open(path, "r") as file:
         for row in csv.reader(file, delimiter=","):
             try:
-                loaded[row[0].strip()] = float(row[2])
+                value = float(row[2])
             except (IndexError, ValueError):
                 continue # 'sep=,' line, header, or blank line
-    missing = set(required) - set(loaded)
-    unknown = set(loaded) - set(required + optional)
-    assert not missing, f"missing coefficients: {missing}"
-    assert not unknown, f"unknown coefficients: {unknown}"
-    fit = dict.fromkeys(optional, 0.0) # only the cubic terms default to 0
-    fit.update(loaded)
-    return fit
+            unit = row[3].strip() if len(row) > 3 else ""  # older files: no unit column
+            direction = row[4].strip() if len(row) > 4 else "exo" # older files: exothermic only
+            if direction not in loaded:
+                raise ValueError(f"unknown direction {direction!r} in {path}")
+            if unit.startswith("cm^3"):
+                value *= 1e10                                    # cm^3/s -> units of 1e-10 cm^3/s
+            name = row[0].strip()
+            if name in loaded[direction]:
+                raise ValueError(f"duplicate {direction} coefficient {name} in {path}")
+            loaded[direction][name] = value
+    fits = []
+    for direction in ("exo", "endo"):
+        coeffs = loaded[direction]
+        if not coeffs:
+            fits.append(None)
+            continue
+        missing = set(required) - set(coeffs)
+        unknown = set(coeffs) - set(required + optional)
+        assert not missing, f"missing {direction} coefficients: {missing}"
+        assert not unknown, f"unknown {direction} coefficients: {unknown}"
+        fit = dict.fromkeys(optional, 0.0)   # only the cubic terms default to 0
+        fit.update(coeffs)
+        fits.append(fit)
+    assert fits[0] is not None, f"no exothermic coefficients in {path}"
+    return fits[0], fits[1]
 
 # <sigma v> function from fit coefficients
 def sigv(fit, mF, T):
@@ -184,12 +205,11 @@ def zoom(post, thetas, Nbs, n_sig=8):
 # Discretise parameter values
 thetas = np.linspace(500, 1500, 501) # Temperature hypothesis grid (nK)
 Nbs = np.linspace(2e3, 10e3, 501) # Bath atom hypothesis grid (no. atoms)
-taus = np.linspace(0, 1.2, 21) # Interaction time (s)
+#taus = np.linspace(0, 1.2, 21) # Interaction time (s)
+taus = np.linspace(0, 5, 41)
 
-B_field = 400.0 # mG (can only choose from known fits)
-fit = load_fit(B_field) # Read fit coefficients for the rates for a given B field
-fit_up = None # Replace None by fit_up for endothermic rates (only for B=50mG)
-#fit_up = load_fit(B_field,suffix="_endo")
+B_field = 50.0 # mG (can only choose from known fits)
+fit, fit_up = load_fits(B_field) # Read fit coefficients for the rates for a given B field. Note fit_up is None except at 50 mG
 
 # Precompute the populations of the 7 levels for all parameter values and interation times.
 q = populations(fit, fit_up, thetas, Nbs, taus) # Has dimensions (len(thetas), len(Nbs), len(taus), 7).
@@ -248,8 +268,8 @@ def block_schedule(n_shots, M_min, M_frac, M_max):
 #  Main loop
 # ---------------------------------------------------------------------------
 
-n_shots = 100000 # total number of shots
-M_min, M_max, M_frac = 100, 10000, 0.1 # shots per adaptive decision = min(M_max,max(M_min, M_frac of shots so far)).
+n_shots = 5000 # total number of shots
+M_min, M_max, M_frac = 100, 1000, 0.05 # shots per adaptive decision = min(M_max,max(M_min, M_frac of shots so far)).
 n_sig = 8 # number of standard deviations the new grid will update to (= posterior mean ± n_sig sigma (in log units))
 
 log_post = log_prior.copy()
@@ -306,7 +326,7 @@ n_shots_str = f"{n_shots:.0e}"
 mantissa, exponent = n_shots_str.split("e")
 n_shots_str = f"{mantissa}e{int(exponent)}"
 
-np.savez(f"data/adaptive_run_B_{B_field}mG_{n_shots_str}_seed{seed}_flat.npz",
+np.savez(f"data/adaptive_run_B_{B_field}mG_{n_shots_str}_seed{seed}_flat_longt.npz",
     thetas=thetas, Nbs=Nbs, taus=taus, mu=mu, T_true=T_true, Nb_true=Nb_true,
     k=np.array(k_list), M=np.array(M_list),
     est=np.array(est_list), cov=np.array(cov_list), F=np.array(F_list), F_prior=F_prior,

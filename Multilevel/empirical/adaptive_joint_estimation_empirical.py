@@ -41,7 +41,7 @@ k_zoom = 1000        # start zooming the grid once this many shots are taken
 
 seeds = range(1, 21)
 n_workers = None     # None -> min(#seeds, #cores). Each worker needs ~0.5-1 GB at NG = 501.
-VERBOSE = False      # per-block printout (interleaves between workers)
+VERBOSE = True      # per-block printout (interleaves between workers)
 SKIP_EXISTING = True # don't redo seeds whose output file already exists
 
 # ---------------------------------------------------------------------------
@@ -51,21 +51,43 @@ SKIP_EXISTING = True # don't redo seeds whose output file already exists
 required = ["a0", "a1", "a2", "b1", "b2", "c1", "c2", "c3", "c4"]
 optional = ["a3", "c5", "c6"]
 
-def load_fit(B_field, folder="../data/fits", suffix=""):
-    loaded = {}
-    with open(f"{folder}/sigmav_fit_coeffs_B_{B_field}mG{suffix}.csv", "r") as file:
+# Read the <sigma v> fit coefficients for a given B field.
+# Returns (fit_down, fit_up): exothermic (mF -> mF-1) and endothermic (mF -> mF+1) coefficients,
+# in units of 1e-10 cm^3/s with T in nK (as rate() assumes). fit_up is None if the file has no endo rows.
+def load_fits(B_field, folder="../data/fits"):
+    path = f"{folder}/sigmav_fit_coeffs_B_{B_field}mG.csv"
+    loaded = {"exo": {}, "endo": {}}
+    with open(path, "r") as file:
         for row in csv.reader(file, delimiter=","):
             try:
-                loaded[row[0].strip()] = float(row[2])
+                value = float(row[2])
             except (IndexError, ValueError):
-                continue
-    missing = set(required) - set(loaded)
-    unknown = set(loaded) - set(required + optional)
-    assert not missing, f"missing coefficients: {missing}"
-    assert not unknown, f"unknown coefficients: {unknown}"
-    fit = dict.fromkeys(optional, 0.0)
-    fit.update(loaded)
-    return fit
+                continue # 'sep=,' line, header, or blank line
+            unit = row[3].strip() if len(row) > 3 else ""  # older files: no unit column
+            direction = row[4].strip() if len(row) > 4 else "exo" # older files: exothermic only
+            if direction not in loaded:
+                raise ValueError(f"unknown direction {direction!r} in {path}")
+            if unit.startswith("cm^3"):
+                value *= 1e10  # cm^3/s -> units of 1e-10 cm^3/s
+            name = row[0].strip()
+            if name in loaded[direction]:
+                raise ValueError(f"duplicate {direction} coefficient {name} in {path}")
+            loaded[direction][name] = value
+    fits = []
+    for direction in ("exo", "endo"):
+        coeffs = loaded[direction]
+        if not coeffs:
+            fits.append(None)
+            continue
+        missing = set(required) - set(coeffs)
+        unknown = set(coeffs) - set(required + optional)
+        assert not missing, f"missing {direction} coefficients: {missing}"
+        assert not unknown, f"unknown {direction} coefficients: {unknown}"
+        fit = dict.fromkeys(optional, 0.0)   # only the cubic terms default to 0
+        fit.update(coeffs)
+        fits.append(fit)
+    assert fits[0] is not None, f"no exothermic coefficients in {path}"
+    return fits[0], fits[1]
 
 def sigv(fit, mF, T):
     return ((fit["a0"] + fit["a1"]*mF + fit["a2"]*mF**2 + fit["a3"]*mF**3)
@@ -75,19 +97,21 @@ def sigv(fit, mF, T):
 def rate(fit, mF, T, Nb):
     return 0.159 * sigv(fit, mF, T)*1e-10 * Nb * (T/1e9) ** (-1.5)
 
+# Build rate matrix describing the (classical) population dynamics of the 7 mF levels
 def build_Gamma(fit_down, fit_up, thetas, Nbs):
+    # Returns rate matrices at every grid point, shape (len(T), len(N), 7, 7)
     T, N = np.asarray(thetas, float)[:, None], np.asarray(Nbs, float)[None, :]
     G = np.zeros((T.shape[0], N.shape[1], 7, 7))
     for i in range(7):
-        mF = 3 - i
-        if i < 6:
+        mF = 3 - i # index i <-> mF = 3 - i
+        if i < 6: # down: mF -> mF-1
             r = rate(fit_down, mF, T, N)
-            assert np.all(r >= 0), f"negative rate for mF={mF:+d}: min {r.min():.2e}"
+            assert np.all(r >= 0), f"negative rate for mF={mF:+d}: min {r.min():.2e} (check the fit / T range)"
             G[..., i + 1, i] += r
             G[..., i, i] -= r
-        if fit_up is not None and i > 0:
+        if fit_up is not None and i > 0: # up (endothermic): mF -> mF+1
             r = rate(fit_up, mF, T, N)
-            assert np.all(r >= 0), f"negative rate for mF={mF:+d}: min {r.min():.2e}"
+            assert np.all(r >= 0), f"negative rate for mF={mF:+d}: min {r.min():.2e} (check the fit / T range)"
             G[..., i - 1, i] += r
             G[..., i, i] -= r
     return G
@@ -201,8 +225,9 @@ def out_path(seed):
 _S = None
 
 def setup():
-    fit_down = load_fit(B_field)
-    fit_up = load_fit(B_field, suffix="_endo") if USE_ENDO else None
+    fit_down, fit_up = load_fits(B_field)
+    if not USE_ENDO:
+        fit_up = None
     thetas0 = np.linspace(*T_RANGE, NG)
     Nbs0 = np.linspace(*NB_RANGE, NG)
     q0 = populations(fit_down, fit_up, thetas0, Nbs0, taus)
