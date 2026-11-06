@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------------
 #  Choose which runs to load (must match adaptive_seeds.py's out_path)
 # ---------------------------------------------------------------------------
-B_field = 400.0
-n_shots_str = "1e4"
+B_field = 50.0
+n_shots_str = "5e3"
 type_T, type_Nb = "flat", "flat"
 
 tag = f"B_{B_field}mG_{n_shots_str}_T-{type_T}_Nb-{type_Nb}"
